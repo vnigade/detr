@@ -65,7 +65,9 @@ class BackboneBase(nn.Module):
         if return_interm_layers:
             return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
         else:
-            return_layers = {'layer4': "0"}
+            # return_layers = {'layer4': "0"}
+            return_layers = {'layer2': "0"}
+            num_channels = 512
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
@@ -82,6 +84,7 @@ class BackboneBase(nn.Module):
 
 class Backbone(BackboneBase):
     """ResNet backbone with frozen BatchNorm."""
+
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
@@ -94,17 +97,24 @@ class Backbone(BackboneBase):
 
 
 class Joiner(nn.Sequential):
-    def __init__(self, backbone, position_embedding):
-        super().__init__(backbone, position_embedding)
+    def __init__(self, backbone, coupling, position_embedding):
+        super().__init__(backbone, coupling, position_embedding)
 
     def forward(self, tensor_list: NestedTensor):
         xs = self[0](tensor_list)
         out: List[NestedTensor] = []
         pos = []
         for name, x in xs.items():
+            x1, _ = x.decompose()
+            x1 = self[1](x1)
+            m = tensor_list.mask
+            assert m is not None
+            mask = F.interpolate(m[None].float(), size=x1.shape[-2:]).to(torch.bool)[0]
+
+            x = NestedTensor(x1, mask)
             out.append(x)
             # position encoding
-            pos.append(self[1](x).to(x.tensors.dtype))
+            pos.append(self[2](x).to(x.tensors.dtype))
 
         return out, pos
 
@@ -114,6 +124,11 @@ def build_backbone(args):
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
-    model = Joiner(backbone, position_embedding)
+    coupling = nn.Sequential(
+        nn.AvgPool2d(kernel_size=(3, 3), stride=2),
+        nn.MaxPool2d(kernel_size=(3, 3), stride=2)
+    )
+    # coupling = nn.Identity()
+    model = Joiner(backbone, coupling, position_embedding)
     model.num_channels = backbone.num_channels
     return model
