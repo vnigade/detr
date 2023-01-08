@@ -7,7 +7,7 @@ import torchvision
 import torch.nn.functional as F
 
 from models.backbone import FrozenBatchNorm2d
-from models.detr import DETR
+from models.detr import DETR, build_criterion, build_postprocessor
 from models.position_encoding import build_position_encoding
 from models.transformer import build_transformer
 from util.misc import NestedTensor, is_main_process, nested_tensor_from_tensor_list
@@ -46,17 +46,26 @@ class SparsEE_DETR(nn.Module):
         self.stages = nn.ModuleDict(stages)
         self.exits = nn.ModuleDict(exits)
 
-    def forward(self, samples: NestedTensor, exit_choices=None):
+    def _forward_exit_branch(self, samples, exit_idx):
+        stage_module = self.stages[_NAME_FMT_STAGE.format(exit_idx)]
+        stage_out = stage_module(samples)
+
+        exit_module = self.exits[_NAME_FMT_EXIT.format(exit_idx)]
+        exit_out = exit_module(stage_out)
+
+        return stage_out, exit_out
+
+    def forward(self, samples: NestedTensor, exit_choice=1):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
 
-        stage0 = self.stages[_NAME_FMT_STAGE.format(0)]
-        stage_out = stage0(samples)
+        stage_out0, exit_out0 = self._forward_exit_branch(samples, exit_idx=0)
+        if exit_choice == 0:
+            return exit_out0
 
-        exit0 = self.exits[_NAME_FMT_EXIT.format(0)]
-        exit_out = exit0(stage_out)
+        stage_out1, exit_out1 = self._forward_exit_branch(stage_out0, exit_idx=1)
 
-        return exit_out
+        return exit_out1
 
 
 class BackboneStage(nn.ModuleDict):
@@ -149,7 +158,14 @@ def build_exit_branch(args, exit_idx, num_classes):
         num_queries=_args.num_queries,
         aux_loss=_args.aux_loss,
     )
-    return exit_branch
+
+    device = torch.device(_args.device)
+    # @TODO: This has to be declared for every exit branch???
+    criterion = build_criterion(_args, num_classes)
+    criterion.to(device)
+    postprocessors = build_postprocessor(_args)
+
+    return exit_branch, criterion, postprocessors
 
 
 def build(args):
@@ -170,12 +186,13 @@ def build(args):
 
     # Now build exit branches
     exit_branches = OrderedDict()
+    criterion_dict = OrderedDict()
+    postprocessors_dict = OrderedDict()
     for exit_idx in range(num_exits):
         exit_name = _NAME_FMT_EXIT.format(exit_idx)
-        exit_branches[exit_name] = build_exit_branch(args, exit_idx, num_classes)
+        exit_branches[exit_name], criterion_dict[exit_idx], postprocessors_dict[exit_idx] = build_exit_branch(
+            args, exit_idx, num_classes)
 
     sparsee_detr = SparsEE_DETR(backbone_stages, exit_branches)
-    # Should we return criterion and postprocessor like DETR model?. This has to be declared for every exit branch
-    # This has to be declared for every exit branch
 
-    return sparsee_detr, None, None
+    return sparsee_detr, criterion_dict, postprocessors_dict
