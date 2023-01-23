@@ -46,6 +46,25 @@ class SparsEE_DETR(nn.Module):
         self.stages = nn.ModuleDict(stages)
         self.exits = nn.ModuleDict(exits)
 
+    def exit_now(self, outputs, exit_idx):
+        _FILTER_CONF = {0: 0.25, 1: 0.25}
+        _EXIT_THRESHOLD = {0: 0.70, 1: 0.75}
+
+        out_logits = outputs['pred_logits']
+        prob = F.softmax(out_logits, -1)
+        scores, labels = prob[..., :-1].max(-1)
+
+        # First filter outputs with lower confidence scores
+        filtered_scores = scores[scores >= _FILTER_CONF[exit_idx]]
+
+        # Now aggregate filtered scores and check the threshold value
+        scores_mean = filtered_scores.mean()
+        
+        if scores_mean >= _EXIT_THRESHOLD[exit_idx]:
+            return True
+
+        return False
+
     def _forward_exit_branch(self, samples, exit_idx):
         stage_module = self.stages[_NAME_FMT_STAGE.format(exit_idx)]
         stage_out = stage_module(samples)
@@ -60,12 +79,12 @@ class SparsEE_DETR(nn.Module):
             samples = nested_tensor_from_tensor_list(samples)
 
         stage_out0, exit_out0 = self._forward_exit_branch(samples, exit_idx=0)
-        if exit_choice == 0:
-            return exit_out0
+        if exit_choice == 0 or self.exit_now(exit_out0, exit_idx=0):
+            return (0, exit_out0)
 
         stage_out1, exit_out1 = self._forward_exit_branch(stage_out0, exit_idx=1)
 
-        return exit_out1
+        return (1, exit_out1)
 
 
 class BackboneStage(nn.ModuleDict):
