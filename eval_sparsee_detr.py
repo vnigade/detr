@@ -146,6 +146,99 @@ def evaluate(args, model, data_loader, base_ds, device):
     utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
 
 
+def compare_exit_outputs(args, model, data_loader, criterion_dict, base_ds, device):
+    """ Function to compare outputs of an exit branch. 
+    This compares the loss value defined in the DETR paper.
+    """
+    _DIFFICULTY_THRESHOLDS = {0: 1.0, 1: 2.0}
+
+    def compute_loss(output, targets, exit_idx):
+        with torch.no_grad():
+            loss_dict = criterion_dict[exit_idx](output, targets)
+            weight_dict = criterion_dict[exit_idx].weight_dict
+            losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
+        return losses
+
+    def pred_to_target(output, orig_targets):
+        """ Function to convert prediction from an exit branch to a format similar to Target, 
+        as expected by loss functions in DETR
+        """
+        _NO_OBJECT_LABEL = 91
+        targets = []
+        for orig_target in orig_targets:  # for every batch target
+            target = {}
+            labels = torch.argmax(output["pred_logits"], axis=-1).squeeze(0)
+            # remove no_object labels (value 91 for coco dataset) and boxes
+            valid_indices = (labels != _NO_OBJECT_LABEL).nonzero(as_tuple=True)[0]
+            target["labels"] = labels[valid_indices]
+            target["boxes"] = torch.index_select(output["pred_boxes"], 1, valid_indices).squeeze(0)
+            target["image_id"] = orig_target["image_id"]
+            target["orig_size"] = orig_target["orig_size"]
+            target["size"] = orig_target["size"]
+            targets.append(target)
+            min, max = orig_targets[0]["labels"].min(), orig_targets[0]["labels"].max()
+            print(f"min, max from orig targets {min}, {max}")
+        return targets
+
+    output_dir = Path(args.output_dir)
+    model.eval()
+    exit_stats = np.zeros(args.num_exits)
+    iou_types = tuple(['bbox'])
+    coco_evaluator = CocoEvaluator(base_ds, iou_types)
+    postprocessors = {'bbox': PostProcess()}
+
+    difficulty_dataset_f = open(output_dir / "exit0_labels.csv", "w")
+
+    for samples, targets in data_loader:
+        samples = samples.to(device)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+        exit_idx, out_exit_0 = model(samples, exit_choice=0)
+        assert exit_idx == 0
+
+        exit_idx, out_exit_1 = model(samples, exit_choice=1)
+        assert exit_idx == 1
+
+        # Now try to match outputs of every exit with the main exit
+        # @TODO: Can we use the same loss function?
+        losses_0 = compute_loss(out_exit_0, targets, exit_idx=0)
+        losses_1 = compute_loss(out_exit_1, targets, exit_idx=1)
+
+        # This block compares the output an exit branch with the main branch.
+        # target_exit_1 = pred_to_target(out_exit_1, targets)
+        # losses_soft_0 = compute_loss(out_exit_0, target_exit_1, exit_idx=0)
+        # losses_soft_1 = compute_loss(out_exit_1, target_exit_1, exit_idx=1)
+
+        print(f"Exit losses: exit_0 = {losses_0}, exit_1 = {losses_1}")
+
+        if losses_0 <= _DIFFICULTY_THRESHOLDS[0]:
+            outputs = out_exit_0
+            exit_stats[0] += 1
+            difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 1\n")
+        else:
+            outputs = out_exit_1
+            exit_stats[1] += 1
+            difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 0\n")
+
+        orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+        results = postprocessors['bbox'](outputs, orig_target_sizes)
+
+        res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+        coco_evaluator.update(res)
+
+    coco_evaluator.synchronize_between_processes()
+    coco_evaluator.accumulate()
+    coco_evaluator.summarize()
+    stats = {}
+    stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
+
+    for exit_idx in range(args.num_exits):
+        print(f"Fraction of samples exited at {exit_idx}: {exit_stats[exit_idx] / exit_stats.sum()}")
+    utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+
+    difficulty_dataset_f.close()
+
+
 def main(args):
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
@@ -161,7 +254,7 @@ def main(args):
     random.seed(seed)
 
     # Build model
-    model, _, _ = build_sparsee_model(args)
+    model, criterion_dict, _ = build_sparsee_model(args)
     model.to(device)
     print_summary(model)
 
@@ -170,19 +263,22 @@ def main(args):
     model.load_state_dict(checkpoint["model"], strict=True)
 
     # Create COCO dataloader
-    dataset_val = build_dataset(image_set='val', args=args)
+    dataset_val = build_dataset(image_set='train', args=args)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     base_ds = get_coco_api_from_dataset(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
     # Evaluate a model
-    evaluate(args, model, data_loader_val, base_ds, device)
-    print("Evaluated SparsEE DETR")
+    # evaluate(args, model, data_loader_val, base_ds, device)
+    # print("Evaluated SparsEE DETR")
+
+    # Compare exit outputs using loss criterion
+    compare_exit_outputs(args, model, data_loader_val, criterion_dict, base_ds, device)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('SparsEE_DETR load and save model from checkpoints', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('Evaluate SparsEE_DETR model', parents=[get_args_parser()])
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)

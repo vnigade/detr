@@ -59,15 +59,18 @@ class SparsEE_DETR(nn.Module):
 
         # Now aggregate filtered scores and check the threshold value
         scores_mean = filtered_scores.mean()
-        
+
         if scores_mean >= _EXIT_THRESHOLD[exit_idx]:
             return True
 
         return False
 
+    def _forward_stage(self, samples, stage_idx):
+        stage_module = self.stages[_NAME_FMT_STAGE.format(stage_idx)]
+        return stage_module(samples)
+
     def _forward_exit_branch(self, samples, exit_idx):
-        stage_module = self.stages[_NAME_FMT_STAGE.format(exit_idx)]
-        stage_out = stage_module(samples)
+        stage_out = self._forward_stage(samples, exit_idx)
 
         exit_module = self.exits[_NAME_FMT_EXIT.format(exit_idx)]
         exit_out = exit_module(stage_out)
@@ -79,7 +82,7 @@ class SparsEE_DETR(nn.Module):
             samples = nested_tensor_from_tensor_list(samples)
 
         stage_out0, exit_out0 = self._forward_exit_branch(samples, exit_idx=0)
-        if exit_choice == 0 or self.exit_now(exit_out0, exit_idx=0):
+        if exit_choice == 0:  # or self.exit_now(exit_out0, exit_idx=0):
             return (0, exit_out0)
 
         stage_out1, exit_out1 = self._forward_exit_branch(stage_out0, exit_idx=1)
@@ -146,6 +149,29 @@ class ExitBranch(DETR):
         super(ExitBranch, self).__init__(backbone=stage_joiner,
                                          transformer=transformer,
                                          **kwargs)
+
+
+class ExitCondition(nn.Sequential):
+    """ Exit condition model to learn exit conditions for exit branches. 
+
+        Currently, it takes features from a backbone stage. @TODO: We should also accept features
+        from transformer block (exit branch), without this the exit condition model acts as a gated model.
+    """
+
+    def __init__(self, in_channels) -> None:
+        layers = [nn.Conv2d(in_channels=in_channels, out_channels=64, kernel_size=3),
+                  nn.ReLU(),
+                  # nn.MaxPool2d(kernel_size=(2, 2), stride=2),
+                  nn.AdaptiveAvgPool2d((5, 5)),  # Adaptive average pooling for constant feature size
+                  nn.Flatten(),
+                  nn.Linear(in_features=1600, out_features=1024),
+                  nn.ReLU(),
+                  nn.Linear(in_features=1024, out_features=1)]
+
+        super(ExitCondition, self).__init__(*layers)
+
+    def forward(self, input):
+        return super().forward(input)
 
 
 def build_backbone_stage(args, backbone, stage_idx):
