@@ -65,9 +65,9 @@ class BackboneBase(nn.Module):
         if return_interm_layers:
             return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
         else:
-            # return_layers = {'layer4': "0"}
-            return_layers = {'layer2': "0"}
-            num_channels = 512
+            return_layers = {'layer4': "0"}
+            # return_layers = {'layer2': "0"}
+            # num_channels = 512
         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
@@ -124,11 +124,11 @@ def build_backbone(args):
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
     backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
-    coupling = nn.Sequential(
-        nn.AvgPool2d(kernel_size=(3, 3), stride=2),
-        nn.MaxPool2d(kernel_size=(3, 3), stride=2)
-    )
-    # coupling = nn.Identity()
+    # coupling = nn.Sequential(
+    #     nn.AvgPool2d(kernel_size=(3, 3), stride=2),
+    #     nn.MaxPool2d(kernel_size=(3, 3), stride=2)
+    # )
+    coupling = nn.Identity()
     model = Joiner(backbone, coupling, position_embedding)
     model.num_channels = backbone.num_channels
     return model

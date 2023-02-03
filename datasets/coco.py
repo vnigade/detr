@@ -12,6 +12,7 @@ import torchvision
 from pycocotools import mask as coco_mask
 
 import datasets.transforms as T
+from torchvision.transforms import Resize as ResizeTransform
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
@@ -112,7 +113,7 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 
-def make_coco_transforms(image_set):
+def make_coco_transforms(image_set, image_size=None):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -136,11 +137,16 @@ def make_coco_transforms(image_set):
         ])
 
     if image_set == 'val':
-        return T.Compose([
-            T.RandomResize([800], max_size=1333),
-            normalize,
-        ])
-
+        if image_size is None:
+            return T.Compose([
+                T.RandomResize([800], max_size=1333),
+                normalize,
+            ])
+        else:
+            return T.Compose([
+                T.RandomResize([image_size], max_size=image_size),
+                normalize,
+            ])
     raise ValueError(f'unknown {image_set}')
 
 
@@ -154,5 +160,7 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks)
+    image_size = None if hasattr(args, 'image_size') == False else args.image_size
+    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(
+        image_set, image_size=image_size), return_masks=args.masks)
     return dataset
