@@ -136,6 +136,12 @@ def make_coco_transforms(image_set, image_size=None):
             normalize,
         ])
 
+    if image_set == "train_exit_condition":
+        return T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ])
+
     if image_set == 'val':
         if image_size is None:
             return T.Compose([
@@ -157,6 +163,7 @@ def build(image_set, args):
     PATHS = {
         "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
         "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+        "train_exit_condition": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
     }
 
     img_folder, ann_file = PATHS[image_set]

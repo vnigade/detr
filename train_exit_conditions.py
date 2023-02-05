@@ -12,6 +12,7 @@ from models import build_sparsee_model
 from models.sparsee_detr import ExitCondition, SparsEE_DETR
 from util.misc import NestedTensor
 import util.misc as utils
+import time
 
 _SparsEE_DETR_BATCHSIZE = 4
 
@@ -121,8 +122,8 @@ def get_args_parser():
 
     # Training parameters
     parser.add_argument('--epochs', default=50, type=int)
-    parser.add_argument('--print_freq', default=5, type=int)
-    parser.add_argument('--saving_freq', default=5, type=int)
+    parser.add_argument('--print_freq', default=50, type=int)
+    parser.add_argument('--saving_freq', default=1, type=int)
 
     return parser
 
@@ -135,7 +136,7 @@ def get_dataset_samples(sparsee_detr_model, samples, targets, labels):
             input = NestedTensor(samples.tensors[i:i + _SparsEE_DETR_BATCHSIZE],
                                  samples.mask[i:i + _SparsEE_DETR_BATCHSIZE])
             stage_out = get_stage_output(sparsee_detr_model, input, stage_idx=0)
-            features.append(stage_out.detach().cpu())
+            features.append(stage_out.clone().detach().cpu())
 
             # Get exit condition labels for the image ids.
             for target in targets[i:i + _SparsEE_DETR_BATCHSIZE]:
@@ -178,31 +179,46 @@ def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loade
     sparsee_detr_model.eval()
     exit_cond_model.train()
 
-    criterion = torch.nn.BCEWithLogitsLoss().to(device)
-    optimizer = torch.optim.Adam(exit_cond_model.parameters())
+    class_weights = torch.tensor(68764 / 49523)  # pos_samples / neg_samples
+    criterion = torch.nn.BCEWithLogitsLoss(pos_weight=class_weights).to(device)
+    optimizer = torch.optim.Adam(exit_cond_model.parameters(), lr=0.001)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
 
+    t1 = time.time()
     for samples, targets in metric_logger.log_every(data_loader, args.print_freq, header):
         samples = samples.to(device)
+        t2 = time.time()
+        data_loading_time = (t2 - t1) * 1e3
         # First get the features from the backbone stage
+        t1 = time.time()
         features, exit_targets = get_dataset_samples(sparsee_detr_model, samples, targets, labels)
         features = features.to(device)
         exit_targets = exit_targets.to(device)
+        t2 = time.time()
+        backbone_time = (t2 - t1) * 1e3
 
         # Now pass it through exit conditiom model
+        t1 = time.time()
         outputs = exit_cond_model(features)
+        t2 = time.time()
+        exit_time = (t2 - t1) * 1e3
 
         # Compute loss and backprop step
+        t1 = time.time()
         loss = criterion(outputs, exit_targets)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        t2 = time.time()
+        backward_time = (t2 - t1) * 1e3
+        # print(f"Time: {data_loading_time}, {backward_time}, {exit_time}, {backward_time}")
 
         metric_logger.update(loss=loss)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        t1 = time.time()
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
@@ -219,7 +235,7 @@ def train(args, exit_cond_model, sparsee_detr_model, data_loader_train, data_loa
         if epoch % args.saving_freq == 0:
             output_path = output_dir / "latest.pth"
             states = {
-                "epochs": args.epochs,
+                "epochs": epoch,
                 "model_state_dict": exit_cond_model.state_dict()
             }
             torch.save(states, output_path)
@@ -260,7 +276,7 @@ def main(args):
     exit_cond_model.to(device)
 
     # Create COCO dataloader
-    dataset_train = build_dataset(image_set='train', args=args)
+    dataset_train = build_dataset(image_set='train_exit_condition', args=args)
     sampler_train = torch.utils.data.SequentialSampler(dataset_train)
     data_loader_train = DataLoader(dataset_train, args.batch_size, sampler=sampler_train,
                                    drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)

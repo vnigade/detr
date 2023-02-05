@@ -263,7 +263,7 @@ def main(args):
     model.load_state_dict(checkpoint["model"], strict=True)
 
     # Create COCO dataloader
-    dataset_val = build_dataset(image_set='train', args=args)
+    dataset_val = build_dataset(image_set='train_exit_condition', args=args)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     base_ds = get_coco_api_from_dataset(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
