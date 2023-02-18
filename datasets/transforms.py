@@ -214,6 +214,7 @@ class RandomSelect(object):
     Randomly selects between transforms1 and transforms2,
     with probability p for transforms1 and (1 - p) for transforms2
     """
+
     def __init__(self, transforms1, transforms2, p=0.5):
         self.transforms1 = transforms1
         self.transforms2 = transforms2
@@ -223,6 +224,29 @@ class RandomSelect(object):
         if random.random() < self.p:
             return self.transforms1(img, target)
         return self.transforms2(img, target)
+
+
+class RandomResizeandCentreCrop(object):
+    """
+    Randomly select one of the sizes and resize it to the value and then 
+    centre crop it using the same size value
+    """
+
+    def __init__(self, sizes):
+        assert isinstance(sizes, (list, tuple))
+        self.sizes = sizes
+
+    def __call__(self, img, target):
+        # Resize first
+        size = random.choice(self.sizes)
+        resized_img, resized_target = resize(img, target, size, size)
+
+        # Now crop it
+        image_width, image_height = resized_img.size
+        crop_height, crop_width = (size, size)
+        crop_top = int(round((image_height - crop_height) / 2.))
+        crop_left = int(round((image_width - crop_width) / 2.))
+        return crop(resized_img, resized_target, (crop_top, crop_left, crop_height, crop_width))
 
 
 class ToTensor(object):

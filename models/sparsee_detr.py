@@ -168,6 +168,17 @@ class ExitCondition(nn.Sequential):
                   nn.ReLU(),
                   nn.Linear(in_features=1024, out_features=1)]
 
+        # layers = [nn.Conv2d(in_channels=in_channels, out_channels=1024, kernel_size=3),
+        #           nn.ReLU(),
+        #           nn.MaxPool2d(kernel_size=(2, 2), stride=2),
+        #           nn.AdaptiveAvgPool2d((3, 3)),  # Adaptive average pooling for constant feature size.
+        #           nn.Flatten(),
+        #           nn.Linear(in_features=9216, out_features=1024),
+        #           nn.ReLU(),
+        #           nn.Linear(in_features=1024, out_features=512),
+        #           nn.ReLU(),
+        #           nn.Linear(in_features=512, out_features=1)]
+
         super(ExitCondition, self).__init__(*layers)
 
     def forward(self, input):

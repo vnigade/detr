@@ -117,6 +117,7 @@ def make_coco_transforms(image_set, image_size=None):
 
     normalize = T.Compose([
         T.ToTensor(),
+        # This normalize also matches with the imagenet in OFA
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
@@ -133,6 +134,14 @@ def make_coco_transforms(image_set, image_size=None):
                     T.RandomResize(scales, max_size=1333),
                 ])
             ),
+            normalize,
+        ])
+
+    scales = [128, 144, 160, 176, 192, 224, 240, 256]
+    if image_set == 'train_ofa_detr':
+        return T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomResizeandCentreCrop(sizes=scales),
             normalize,
         ])
 
@@ -164,6 +173,7 @@ def build(image_set, args):
         "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
         "val": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
         "train_exit_condition": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
+        "train_ofa_detr": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
     }
 
     img_folder, ann_file = PATHS[image_set]

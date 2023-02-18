@@ -148,9 +148,9 @@ def get_dataset_samples(sparsee_detr_model, samples, targets, labels):
     return features, exit_targets
 
 
-def val(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
+def validate(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
     _EXIT_THRESHOLD = 0.75
-    total_pred, correct_pred = 0, 0
+    TP, FP, FN, TN = 0, 0, 0, 0
     with torch.no_grad():
         for samples, targets in data_loader:
             samples = samples.to(device)
@@ -165,14 +165,19 @@ def val(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
 
             for output, exit_target in zip(outputs, exit_targets):
                 exit_now: bool = output >= _EXIT_THRESHOLD
-                if exit_now == exit_target:
-                    # print("Correct prediction")
-                    correct_pred += 1
-                # else:
-                    # print("Wrong prediction")
-                total_pred += 1
+                if exit_now == 1 and exit_target == 1:
+                    TP += 1
+                elif exit_now == 1 and exit_target == 0:
+                    FP += 1
+                elif exit_now == 0 and exit_target == 1:
+                    FN += 1
+                elif exit_now == 0 and exit_target == 0:
+                    TN += 1
+                else:
+                    raise NotImplementedError("Decision is not binary integers")
 
-    print(f"Validation: accuracy {(correct_pred/total_pred)*100}")
+    total = TP + FP + FN + TN
+    print(f"Validation: TP = {TP/total}, FP = {FP/total}, FN = {FN/total}, TN = {TN/total}")
 
 
 def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loader, labels, device):
@@ -181,7 +186,7 @@ def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loade
 
     class_weights = torch.tensor(68764 / 49523)  # pos_samples / neg_samples
     criterion = torch.nn.BCEWithLogitsLoss(pos_weight=class_weights).to(device)
-    optimizer = torch.optim.Adam(exit_cond_model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(exit_cond_model.parameters(), lr=0.0001)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -226,11 +231,12 @@ def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loade
 def train(args, exit_cond_model, sparsee_detr_model, data_loader_train, data_loader_val, labels_train, labels_val, device):
     output_dir = Path(args.output_dir)
     for epoch in range(args.start_epoch, args.epochs):
+        validate(exit_cond_model, sparsee_detr_model, data_loader_val, labels_val, device)
         train_stats = train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model,
                                       data_loader_train, labels_train, device)
 
         print(train_stats)
-        val(exit_cond_model, sparsee_detr_model, data_loader_val, labels_val, device)
+        # val(exit_cond_model, sparsee_detr_model, data_loader_val, labels_val, device)
 
         if epoch % args.saving_freq == 0:
             output_path = output_dir / "latest.pth"

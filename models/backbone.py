@@ -10,6 +10,7 @@ import torchvision
 from torch import nn
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
+from models.ofa_backbone import build_ofa_backbone
 
 from util.misc import NestedTensor, is_main_process
 
@@ -123,7 +124,12 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+
+    if args.backbone == "ofa_resnet":
+        backbone = build_ofa_backbone()
+    else:
+        backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+
     # coupling = nn.Sequential(
     #     nn.AvgPool2d(kernel_size=(3, 3), stride=2),
     #     nn.MaxPool2d(kernel_size=(3, 3), stride=2)
