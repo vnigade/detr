@@ -184,6 +184,86 @@ def eval_timings(args, detr_model: torch.nn.Module):
     return
 
 
+def _eval_static_switching_cost(model, input_size, output_dir, gpu_number=0, max_batch_size=8):
+    NUM_ITERS = 100
+    NUM_INFERENCES = 3
+
+    # Warm up
+    data = torch.rand(1, 3, input_size, input_size)
+    data = data.cuda(device=gpu_number)
+    model.cuda(device=gpu_number)
+    output = model(data)
+    model.cpu()
+    torch.cuda.synchronize(device=gpu_number)
+
+    cpu2gpu_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+    inference_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+    gpu2cpu_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+
+    for batch_size in range(1, max_batch_size + 1):
+        for iter in range(NUM_ITERS):
+            # CPU to GPU parameter transfer
+            start_time = time.time()
+            model.cuda(device=gpu_number)
+            torch.cuda.synchronize(device=gpu_number)
+            cpu2gpu_time = (time.time() - start_time) * 1e3
+
+            # Inference times
+            inference_time = 0
+            for i in range(NUM_INFERENCES):
+                data = torch.rand(batch_size, 3, input_size, input_size)
+                data = data.cuda(gpu_number)
+                torch.cuda.synchronize(device=gpu_number)
+
+                start_time = time.time()
+                with torch.no_grad():
+                    output = model(data)
+                torch.cuda.synchronize(device=gpu_number)
+                inference_time += ((time.time() - start_time) * 1e3)
+
+            # GPU to CPU transfer
+            start_time = time.time()
+            model.cpu()
+            torch.cuda.synchronize(device=gpu_number)
+            gpu2cpu_time = (time.time() - start_time) * 1e3
+
+            # Update stats
+            cpu2gpu_times[batch_size - 1][iter] = round(cpu2gpu_time, 3)
+            inference_times[batch_size - 1][iter] = round(inference_time, 3)
+            gpu2cpu_times[batch_size - 1][iter] = round(gpu2cpu_time, 3)
+
+    with open(output_dir / f"eval_static_switching_cost_{input_size}.txt", "w") as out_file:
+        out_file.write(f"BatchSize\tCPU2GPUTime\tInferenceTime\tGPU2CPUTime\n")
+        for batch_size in range(1, max_batch_size + 1):
+            cpu2gpu_time = '%.3f' % round(cpu2gpu_times[batch_size - 1].mean(), 3)
+            inference_time = '%.3f' % round(inference_times[batch_size - 1].mean(), 3)
+            gpu2cpu_time = '%.3f' % round(gpu2cpu_times[batch_size - 1].mean(), 3)
+
+            out_file.write(f"{batch_size}\t{cpu2gpu_time}\t{inference_time}\t{gpu2cpu_time}\n")
+
+    return
+
+
+def eval_switching_cost(args):
+    output_dir = Path(args.output_dir)
+    models_dict = {}
+    for input_size in SUPPORTED_INPUT_SIZES:
+        _args = copy.deepcopy(args)
+        _args.image_size = input_size
+        _args.ofa_type = "static"
+
+        model, criterion, postprocessors = build_model(args)
+        checkpoint_state = load_checkpoint(output_dir / f"checkpoint_static_{input_size}.pth")["model"]
+        model.load_state_dict(checkpoint_state, strict=True)
+        model.eval()
+        model.cpu()
+
+        models_dict[input_size] = model
+
+    for input_size in SUPPORTED_INPUT_SIZES:
+        _eval_static_switching_cost(models_dict[input_size], input_size=input_size, output_dir=output_dir)
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector with OFA backbone', add_help=False)
     parser.add_argument('--lr', default=1e-4, type=float)
@@ -262,11 +342,13 @@ def get_args_parser():
                         help='start epoch')
     parser.add_argument('--eval_accuracy', action='store_true')
     parser.add_argument('--eval_timings', action='store_true')
+    parser.add_argument('--eval_switching_cost', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
 
     # OFA-DETR parameters
     parser.add_argument('--ofa_type', help="Type of OFA mode", choices=["static", "dynamic"], default="dynamic")
-    parser.add_argument('--merge_ofa_detr', help="merge pretrained checkpoints from OFA and DETR", action='store_true')
+    parser.add_argument('--merge_ofa_detr', help="merge pretrained checkpoints from OFA and DETR",
+                        action='store_true')
     parser.add_argument('--ofa_checkpoint', default='', help='path to the pretrained OFA checkpoint')
     parser.add_argument('--detr_checkpoint', default='', help='path to the pretrained DETR checkpoint')
 
@@ -290,6 +372,9 @@ def main(args):
 
     if args.merge_ofa_detr:
         return merge_ofa_detr(args)
+
+    if args.eval_switching_cost:
+        return eval_switching_cost(args)
 
     device = torch.device(args.device)
     model, criterion, postprocessors = build_model(args)
