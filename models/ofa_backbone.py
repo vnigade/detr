@@ -47,12 +47,13 @@ SUBNET_CONFIG = {
 }
 
 
-def set_active_backbone(ofa_model, input_size):
-    if input_size not in SUBNET_CONFIG:
-        raise NotImplementedError(f"No OFA subnet available for input size {input_size}")
-
-    print(f"Setting OFA subnet to {SUBNET_CONFIG[input_size]}")
-    ofa_model.set_active_subnet(**SUBNET_CONFIG[input_size])
+def set_active_backbone(ofa_model: OFAResNets, input_size=None):
+    if input_size is None:
+        print(f"Setting OFA subnet to max network size")
+        ofa_model.set_max_net()
+    else:
+        print(f"Setting OFA subnet to {SUBNET_CONFIG[input_size]}")
+        ofa_model.set_active_subnet(**SUBNET_CONFIG[input_size])
     return
 
 

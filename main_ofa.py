@@ -244,24 +244,92 @@ def _eval_static_switching_cost(model, input_size, output_dir, gpu_number=0, max
     return
 
 
+def _eval_dynamic_switching_cost(model, input_size, output_dir, gpu_number=0, max_batch_size=8):
+    NUM_ITERS = 100
+    NUM_INFERENCES = 3
+
+    # Warm up
+    data = torch.rand(1, 3, input_size, input_size)
+    set_active_backbone(model.backbone.feature_extractor, input_size=None)
+    model.cuda(device=gpu_number)
+    output = model(data)
+    torch.cuda.synchronize(device=gpu_number)
+
+    switching_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+    inference_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+
+    for batch_size in range(1, max_batch_size + 1):
+        for iter in range(NUM_ITERS):
+            # Switch to subnet from max network
+            start_time = time.time()
+            set_active_backbone(model.backbone.feature_extractor, input_size=input_size)
+            torch.cuda.synchronize(device=gpu_number)
+            switching_time = (time.time() - start_time) * 1e3
+
+            # Inference times
+            inference_time = 0
+            for i in range(NUM_INFERENCES):
+                data = torch.rand(batch_size, 3, input_size, input_size)
+                data = data.cuda(gpu_number)
+                torch.cuda.synchronize(device=gpu_number)
+
+                start_time = time.time()
+                with torch.no_grad():
+                    output = model(data)
+                torch.cuda.synchronize(device=gpu_number)
+                inference_time += ((time.time() - start_time) * 1e3)
+
+            inference_time = inference_time / NUM_INFERENCES
+
+            # Switch to max network
+            set_active_backbone(model.backbone.feature_extractor, input_size=None)
+            torch.cuda.synchronize(device=gpu_number)
+
+            # Update stats
+            switching_times[batch_size - 1][iter] = round(switching_time, 3)
+            inference_times[batch_size - 1][iter] = round(inference_time, 3)
+
+    with open(output_dir / f"eval_dynamic_switching_cost_{input_size}.txt", "w") as out_file:
+        out_file.write(f"BatchSize\tSwitchingTime\tInferenceTime\n")
+        for batch_size in range(1, max_batch_size + 1):
+            switching_time = '%.3f' % round(switching_times[batch_size - 1].mean(), 3)
+            inference_time = '%.3f' % round(inference_times[batch_size - 1].mean(), 3)
+
+            out_file.write(f"{batch_size}\t{switching_time}\t{inference_time}\n")
+
+    return
+
+
 def eval_switching_cost(args):
     output_dir = Path(args.output_dir)
-    models_dict = {}
-    for input_size in SUPPORTED_INPUT_SIZES:
-        _args = copy.deepcopy(args)
-        _args.image_size = input_size
-        _args.ofa_type = "static"
+    if args.ofa_type == "static":
+        models_dict = {}
+        for input_size in SUPPORTED_INPUT_SIZES:
+            _args = copy.deepcopy(args)
+            _args.image_size = input_size
+            _args.ofa_type = "static"
 
-        model, criterion, postprocessors = build_model(_args)
-        checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_static_{input_size}.pth"))["model"]
+            model, criterion, postprocessors = build_model(_args)
+            checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_static_{input_size}.pth"))["model"]
+            model.load_state_dict(checkpoint_state, strict=True)
+            model.eval()
+            model.cpu()
+
+            models_dict[input_size] = model
+
+        for input_size in SUPPORTED_INPUT_SIZES:
+            _eval_static_switching_cost(models_dict[input_size], input_size=input_size, output_dir=output_dir)
+
+    elif args.ofa_type == "dynamic":
+        model, criterion, postprocessors = build_model(args)
+        checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_dynamic.pth"))["model"]
         model.load_state_dict(checkpoint_state, strict=True)
         model.eval()
         model.cpu()
 
-        models_dict[input_size] = model
-
-    for input_size in SUPPORTED_INPUT_SIZES:
-        _eval_static_switching_cost(models_dict[input_size], input_size=input_size, output_dir=output_dir)
+        for input_size in SUPPORTED_INPUT_SIZES:
+            _eval_dynamic_switching_cost(model, input_size=input_size, output_dir=output_dir)
+            model.cpu()
 
 
 def get_args_parser():
