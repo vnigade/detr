@@ -10,13 +10,23 @@ from collections import OrderedDict
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
+import torch.backends.cudnn as cudnn
 
 import datasets
+from models.ofa_backbone import set_active_backbone
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
 
+def set_deterministic_behaviour(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    cudnn.enabled = False
+    cudnn.deterministic = True
+    cudnn.benchmark = False
+    np.random.seed(seed)
+    random.seed(seed)
 
 def print_summary(model, data_shape=(3, 800, 1000)):
     # summary(model, data_shape) # @TODO: This does not work because of the output shape in the detection output.
@@ -85,6 +95,59 @@ def merge_ofa_detr(args, detr_model: torch.nn.Module):
 
     return
 
+def eval_timings(args, detr_model: torch.nn.Module):
+    output_dir = Path(args.output_dir)
+    NUM_ITERS=100
+    max_batch_size = args.batch_size
+
+    exec_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+    backbone_times = np.zeros((max_batch_size, NUM_ITERS), dtype=np.float32)
+    transformer_times = np.zeros((max_batch_size, NUM_ITERS), dtype=np.float32)
+    detection_times = np.zeros((max_batch_size, NUM_ITERS), dtype=np.float32)
+
+    detr_model.eval()
+    set_active_backbone(detr_model.backbone.feature_extractor, input_size=args.image_size)
+
+    for batch_size in range(1, max_batch_size+1):
+        # Warmup
+        for _ in range(10):
+            data = torch.rand(batch_size, 3, args.image_size, args.image_size)
+            data = data.cuda()
+            with torch.no_grad():
+                output, (backbone_time, transformer_time, detection_time) = detr_model(data, 
+                                                                                        stats=True)
+
+        for iter in range(NUM_ITERS):
+            data = torch.rand(batch_size, 3, args.image_size, args.image_size)
+            data = data.cuda()
+            torch.cuda.synchronize()
+            t1 = time.time()
+            with torch.no_grad():
+                output, (backbone_time, transformer_time, detection_time) = detr_model(data, 
+                                                                                    stats=True)
+            torch.cuda.synchronize()
+            t2 = time.time()
+
+            elapsed_time = (t2 - t1) * 1e3
+            exec_times[batch_size-1][iter] = elapsed_time
+            backbone_times[batch_size-1][iter] = backbone_time
+            transformer_times[batch_size-1][iter] = transformer_time
+            detection_times[batch_size-1][iter] = detection_time
+
+    
+
+    with open(output_dir / f"eval_timings_{args.image_size}.txt", "w") as out_file:
+        out_file.write(f"BatchSize\tElapsedTiming(ms)\tBackboneTime\tTransformerTime\tDetectionTime\n")
+        for batch_size in range(1, max_batch_size+1):
+            elapsed_time = '%.3f' % round(exec_times[batch_size-1].mean(), 3)
+            backbone_time = '%.3f' %  round(backbone_times[batch_size-1].mean(), 3)
+            transformer_time = '%.3f' %  round(transformer_times[batch_size-1].mean(), 3)
+            detection_time = '%.3f' % round(detection_times[batch_size-1].mean(), 3)
+
+            out_file.write(f"{batch_size}\t{elapsed_time}\t{backbone_time}"
+                            f"\t{transformer_time}\t{detection_time}\n")
+
+    return
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector with OFA backbone', add_help=False)
@@ -162,8 +225,10 @@ def get_args_parser():
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
-    parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--eval_accuracy', action='store_true')
+    parser.add_argument('--eval_timings', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
+    
 
     # OFA-DETR parameters
     parser.add_argument('--merge_ofa_detr', help="merge pretrained checkpoints from OFA and DETR", action='store_true')
@@ -178,6 +243,9 @@ def get_args_parser():
 
 
 def main(args):
+    seed = args.seed + utils.get_rank()
+    set_deterministic_behaviour(seed)
+
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -187,18 +255,13 @@ def main(args):
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
-    seed = args.seed + utils.get_rank()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-
     model, criterion, postprocessors = build_model(args)
     model.to(device)
     # print_summary(model)
 
     if args.merge_ofa_detr:
         return merge_ofa_detr(args, model)
+    
 
     model_without_ddp = model
     if args.distributed:
@@ -217,6 +280,27 @@ def main(args):
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+
+    if args.frozen_weights is not None:
+        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
+        model_without_ddp.detr.load_state_dict(checkpoint['model'], strict=False)
+
+    output_dir = Path(args.output_dir)
+    if args.resume:
+        if args.resume.startswith('https'):
+            checkpoint = torch.hub.load_state_dict_from_url(
+                args.resume, map_location='cpu', check_hash=True)
+        else:
+            checkpoint = torch.load(args.resume, map_location='cpu')
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
+        print(f"Resuming from checkpoint {args.resume}")
+        if not args.eval_accuracy and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            args.start_epoch = checkpoint['epoch'] + 1
+
+    if args.eval_timings:
+        return eval_timings(args, model)
 
     dataset_train = build_dataset(image_set='train_ofa_detr', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
@@ -243,31 +327,13 @@ def main(args):
     else:
         base_ds = get_coco_api_from_dataset(dataset_val)
 
-    if args.frozen_weights is not None:
-        checkpoint = torch.load(args.frozen_weights, map_location='cpu')
-        model_without_ddp.detr.load_state_dict(checkpoint['model'], strict=False)
-
-    output_dir = Path(args.output_dir)
-    if args.resume:
-        if args.resume.startswith('https'):
-            checkpoint = torch.hub.load_state_dict_from_url(
-                args.resume, map_location='cpu', check_hash=True)
-        else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
-        print(f"Resuming from checkpoint {args.resume}")
-        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-            args.start_epoch = checkpoint['epoch'] + 1
-
-    if args.eval:
+    if args.eval_accuracy:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
-
+    
     print("Start training")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):

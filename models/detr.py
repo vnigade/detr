@@ -43,7 +43,7 @@ class DETR(nn.Module):
         self.backbone = backbone
         self.aux_loss = aux_loss
 
-    def forward(self, samples: NestedTensor):
+    def forward(self, samples: NestedTensor, stats=False):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -73,11 +73,16 @@ class DETR(nn.Module):
         transformer_time = (timeit.default_timer() - start_time) * 1e3
         # print(f"Execution times: backbone_time = {backbone_time}, transformer_time = {transformer_time}")
 
+        start_time = timeit.default_timer()
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
+        detection_time = (timeit.default_timer() - start_time) * 1e3
+
+        if stats:
+            return out, (backbone_time, transformer_time, detection_time)
         return out
 
     @torch.jit.unused

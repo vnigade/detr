@@ -101,6 +101,10 @@ class Joiner(nn.Sequential):
     def __init__(self, backbone, coupling, position_embedding):
         super().__init__(backbone, coupling, position_embedding)
 
+    @property
+    def feature_extractor(self):
+        return self[0]
+
     def forward(self, tensor_list: NestedTensor):
         xs = self[0](tensor_list)
         out: List[NestedTensor] = []
