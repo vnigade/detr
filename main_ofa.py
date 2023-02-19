@@ -1,5 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
+import copy
 import datetime
 import json
 import random
@@ -13,11 +14,12 @@ from torch.utils.data import DataLoader, DistributedSampler
 import torch.backends.cudnn as cudnn
 
 import datasets
-from models.ofa_backbone import set_active_backbone
+from models.ofa_backbone import SUPPORTED_INPUT_SIZES, build_ofa_backbone, get_static_ofa, set_active_backbone
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
+
 
 def set_deterministic_behaviour(seed):
     torch.manual_seed(seed)
@@ -27,6 +29,7 @@ def set_deterministic_behaviour(seed):
     cudnn.benchmark = False
     np.random.seed(seed)
     random.seed(seed)
+
 
 def print_summary(model, data_shape=(3, 800, 1000)):
     # summary(model, data_shape) # @TODO: This does not work because of the output shape in the detection output.
@@ -50,13 +53,12 @@ def load_checkpoint(path: str):
     return checkpoint
 
 
-def load_ofa_state(model_state_dict, ofa_checkpoint_path: str):
+def load_ofa_state(model_state_dict, ofa_checkpoint_state):
     """
     @TODO:
     Merging state dicts with different checkpoints is also in other main files, so it's also a duplicate. WTH, Make it clean.
     """
     _BACKBONE_LAYER_PREFIX = "backbone"
-    ofa_checkpoint = torch.load(ofa_checkpoint_path, map_location='cpu')["state_dict"]
 
     new_state_dict = OrderedDict()
     for model_key, model_value in model_state_dict.items():
@@ -67,7 +69,7 @@ def load_ofa_state(model_state_dict, ofa_checkpoint_path: str):
 
         common_key = model_key.split(".", 2)[2]
         # Change only the backbone
-        for ckpt_key, ckpt_value in ofa_checkpoint.items():
+        for ckpt_key, ckpt_value in ofa_checkpoint_state.items():
             if common_key in ckpt_key and model_key not in new_state_dict:
                 new_state_dict[model_key] = ckpt_value
 
@@ -76,28 +78,62 @@ def load_ofa_state(model_state_dict, ofa_checkpoint_path: str):
     return new_state_dict
 
 
-def merge_ofa_detr(args, detr_model: torch.nn.Module):
+def build_ofa_detr(args, ofa_type, input_size):
+    device = torch.device(args.device)
+
+    # 1. Build static DETR for the input size
+    ofa_detr_model, criterion, postprocessors = build_model(args)
+    ofa_detr_model.to(device)
+
+    # 2. First load the whole DETR pretrained which would load input_proj, transformer blocks and other modules instead of OFA backbone
+    detr_checkpoint_state = load_checkpoint(args.detr_checkpoint)
+    ofa_detr_model.load_state_dict(detr_checkpoint_state["model"], strict=False)
+
+    # 3. Now get the pretrained checkpoints for the OFA component
+    ofa_checkpoint_state = torch.load(args.ofa_checkpoint, map_location='cpu')["state_dict"]
+    ofa_dynamic_model = build_ofa_backbone(ofa_type="dynamic")
+    ofa_dynamic_model.load_state_dict(ofa_checkpoint_state, strict=True)
+    if ofa_type == "static":
+        # Get the static ofa from dynamic ofa with preserved weights.
+        # Thus, it's state dictionary now contains pretrained weights.
+        ofa_static_model = get_static_ofa(ofa_model=ofa_dynamic_model, input_size=input_size)
+        ofa_checkpoint_state = ofa_static_model.state_dict()
+    elif ofa_type == "dynamic":
+        ofa_checkpoint_state = ofa_dynamic_model.state_dict()
+
+    # 4. Load the checkpoints for the OFA component from the ofa checkpoint
+    new_model_state = load_ofa_state(ofa_detr_model.state_dict(), ofa_checkpoint_state)
+
+    # 5. Finally, load the whole DETR state with strict flag on
+    ofa_detr_model.load_state_dict(new_model_state, strict=True)
+
+    return ofa_detr_model
+
+
+def merge_ofa_detr(args):
     output_dir = Path(args.output_dir)
 
-    # First load the whole DETR pretrained which would load input_proj, transformer blocks and other modules instead of OFA backbone
-    detr_checkpoint_state = load_checkpoint(args.detr_checkpoint)
-    detr_model.load_state_dict(detr_checkpoint_state["model"], strict=False)
+    # First save dynamic ofa-detr model
+    ofa_detr_model = build_ofa_detr(args, ofa_type="dynamic", input_size=None)
+    checkpoint_path = output_dir / 'checkpoint_dynamic.pth'
+    utils.save_on_master({'model': ofa_detr_model.state_dict()}, checkpoint_path)
 
-    # Now get the OFA partial dictionary.
-    new_model_state = load_ofa_state(detr_model.state_dict(), args.ofa_checkpoint)
+    # Now build static ofa-detr model
+    for input_size in SUPPORTED_INPUT_SIZES:
+        _args = copy.deepcopy(args)
+        _args.image_size = input_size
+        _args.ofa_type = "static"
 
-    # Finally, load the whole state with strict flag on
-    detr_model.load_state_dict(new_model_state, strict=True)
-
-    # Save the merged model
-    checkpoint_path = output_dir / 'checkpoint.pth'
-    utils.save_on_master({'model': detr_model.state_dict()}, checkpoint_path)
+        ofa_detr_model = build_ofa_detr(_args, ofa_type="static", input_size=input_size)
+        checkpoint_path = output_dir / f'checkpoint_static_{input_size}.pth'
+        utils.save_on_master({'model': ofa_detr_model.state_dict()}, checkpoint_path)
 
     return
 
+
 def eval_timings(args, detr_model: torch.nn.Module):
     output_dir = Path(args.output_dir)
-    NUM_ITERS=100
+    NUM_ITERS = 100
     max_batch_size = args.batch_size
 
     exec_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
@@ -108,14 +144,14 @@ def eval_timings(args, detr_model: torch.nn.Module):
     detr_model.eval()
     set_active_backbone(detr_model.backbone.feature_extractor, input_size=args.image_size)
 
-    for batch_size in range(1, max_batch_size+1):
+    for batch_size in range(1, max_batch_size + 1):
         # Warmup
         for _ in range(10):
             data = torch.rand(batch_size, 3, args.image_size, args.image_size)
             data = data.cuda()
             with torch.no_grad():
-                output, (backbone_time, transformer_time, detection_time) = detr_model(data, 
-                                                                                        stats=True)
+                output, (backbone_time, transformer_time, detection_time) = detr_model(data,
+                                                                                       stats=True)
 
         for iter in range(NUM_ITERS):
             data = torch.rand(batch_size, 3, args.image_size, args.image_size)
@@ -123,31 +159,30 @@ def eval_timings(args, detr_model: torch.nn.Module):
             torch.cuda.synchronize()
             t1 = time.time()
             with torch.no_grad():
-                output, (backbone_time, transformer_time, detection_time) = detr_model(data, 
-                                                                                    stats=True)
+                output, (backbone_time, transformer_time, detection_time) = detr_model(data,
+                                                                                       stats=True)
             torch.cuda.synchronize()
             t2 = time.time()
 
             elapsed_time = (t2 - t1) * 1e3
-            exec_times[batch_size-1][iter] = elapsed_time
-            backbone_times[batch_size-1][iter] = backbone_time
-            transformer_times[batch_size-1][iter] = transformer_time
-            detection_times[batch_size-1][iter] = detection_time
-
-    
+            exec_times[batch_size - 1][iter] = elapsed_time
+            backbone_times[batch_size - 1][iter] = backbone_time
+            transformer_times[batch_size - 1][iter] = transformer_time
+            detection_times[batch_size - 1][iter] = detection_time
 
     with open(output_dir / f"eval_timings_{args.image_size}.txt", "w") as out_file:
         out_file.write(f"BatchSize\tElapsedTiming(ms)\tBackboneTime\tTransformerTime\tDetectionTime\n")
-        for batch_size in range(1, max_batch_size+1):
-            elapsed_time = '%.3f' % round(exec_times[batch_size-1].mean(), 3)
-            backbone_time = '%.3f' %  round(backbone_times[batch_size-1].mean(), 3)
-            transformer_time = '%.3f' %  round(transformer_times[batch_size-1].mean(), 3)
-            detection_time = '%.3f' % round(detection_times[batch_size-1].mean(), 3)
+        for batch_size in range(1, max_batch_size + 1):
+            elapsed_time = '%.3f' % round(exec_times[batch_size - 1].mean(), 3)
+            backbone_time = '%.3f' % round(backbone_times[batch_size - 1].mean(), 3)
+            transformer_time = '%.3f' % round(transformer_times[batch_size - 1].mean(), 3)
+            detection_time = '%.3f' % round(detection_times[batch_size - 1].mean(), 3)
 
             out_file.write(f"{batch_size}\t{elapsed_time}\t{backbone_time}"
-                            f"\t{transformer_time}\t{detection_time}\n")
+                           f"\t{transformer_time}\t{detection_time}\n")
 
     return
+
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector with OFA backbone', add_help=False)
@@ -228,9 +263,9 @@ def get_args_parser():
     parser.add_argument('--eval_accuracy', action='store_true')
     parser.add_argument('--eval_timings', action='store_true')
     parser.add_argument('--num_workers', default=2, type=int)
-    
 
     # OFA-DETR parameters
+    parser.add_argument('--ofa_type', help="Type of OFA mode", choices=["static", "dynamic"], default="dynamic")
     parser.add_argument('--merge_ofa_detr', help="merge pretrained checkpoints from OFA and DETR", action='store_true')
     parser.add_argument('--ofa_checkpoint', default='', help='path to the pretrained OFA checkpoint')
     parser.add_argument('--detr_checkpoint', default='', help='path to the pretrained DETR checkpoint')
@@ -253,15 +288,13 @@ def main(args):
         assert args.masks, "Frozen training is meant for segmentation only"
     print(args)
 
-    device = torch.device(args.device)
+    if args.merge_ofa_detr:
+        return merge_ofa_detr(args)
 
+    device = torch.device(args.device)
     model, criterion, postprocessors = build_model(args)
     model.to(device)
     # print_summary(model)
-
-    if args.merge_ofa_detr:
-        return merge_ofa_detr(args, model)
-    
 
     model_without_ddp = model
     if args.distributed:
@@ -333,7 +366,7 @@ def main(args):
         if args.output_dir:
             utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
         return
-    
+
     print("Start training")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):

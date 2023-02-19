@@ -130,7 +130,7 @@ def build_backbone(args):
     return_interm_layers = args.masks
 
     if args.backbone == "ofa_resnet":
-        backbone = build_ofa_backbone()
+        backbone = build_ofa_backbone(args.ofa_type, args.image_size)
     else:
         backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
 
