@@ -1,4 +1,7 @@
+from typing import Dict
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ofa.utils.layers import (
     set_layer_from_config,
@@ -8,6 +11,8 @@ from ofa.utils.layers import (
 )
 from ofa.utils.layers import ResNetBottleneckBlock, ResidualBlock
 from ofa.utils import make_divisible, MyNetwork, MyGlobalAvgPool2d
+from util.misc import NestedTensor
+
 
 __all__ = ["ResNets", "ResNet50", "ResNet50D"]
 
@@ -28,15 +33,32 @@ class ResNets(MyNetwork):
         self.global_avg_pool = MyGlobalAvgPool2d(keep_dim=False)
         self.classifier = classifier
 
-    def forward(self, x):
+    def _forward(self, x):
         for layer in self.input_stem:
             x = layer(x)
         x = self.max_pooling(x)
         for block in self.blocks:
             x = block(x)
-        x = self.global_avg_pool(x)
-        x = self.classifier(x)
+        # x = self.global_avg_pool(x)
+        # x = self.classifier(x)
         return x
+
+    def forward(self, tensor_list: NestedTensor):
+        """ 
+        Modified the function to handle tensorlist as input to the model
+        """
+        y = self._forward(tensor_list.tensors)
+
+        m = tensor_list.mask
+        assert m is not None
+        mask = F.interpolate(m[None].float(), size=y.shape[-2:]).to(torch.bool)[0]
+
+        # Output format is kept consistent with the interface to the Joiner module
+        # with the transformer block of the DETR model
+        out: Dict[str, NestedTensor] = {
+            "0": NestedTensor(y, mask)
+        }
+        return out
 
     @property
     def module_str(self):

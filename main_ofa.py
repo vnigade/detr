@@ -252,8 +252,8 @@ def eval_switching_cost(args):
         _args.image_size = input_size
         _args.ofa_type = "static"
 
-        model, criterion, postprocessors = build_model(args)
-        checkpoint_state = load_checkpoint(output_dir / f"checkpoint_static_{input_size}.pth")["model"]
+        model, criterion, postprocessors = build_model(_args)
+        checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_static_{input_size}.pth"))["model"]
         model.load_state_dict(checkpoint_state, strict=True)
         model.eval()
         model.cpu()
