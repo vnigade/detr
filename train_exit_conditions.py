@@ -11,7 +11,7 @@ from datasets import build_dataset, get_coco_api_from_dataset
 from datasets.coco_eval import CocoEvaluator
 from models import build_sparsee_model
 from models.detr import PostProcess
-from models.sparsee_detr import ExitCondition, SparsEE_DETR
+from models.fixee_detr import ExitCondition, SparsEE_DETR
 from util.misc import NestedTensor
 import util.misc as utils
 import time

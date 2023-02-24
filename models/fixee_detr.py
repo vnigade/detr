@@ -37,11 +37,11 @@ _NAME_FMT_STAGE = "stage{0:02}"
 _NAME_FMT_EXIT = "exit{0:02}"
 
 
-class SparsEE_DETR(nn.Module):
+class FixEE_DETR(nn.Module):
     """ The sparse version of the DETR model together with early exit branches"""
 
     def __init__(self, stages: OrderedDict, exits: OrderedDict):
-        super(SparsEE_DETR, self).__init__()
+        super(FixEE_DETR, self).__init__()
 
         self.stages = nn.ModuleDict(stages)
         self.exits = nn.ModuleDict(exits)
@@ -249,6 +249,6 @@ def build(args):
         exit_branches[exit_name], criterion_dict[exit_idx], postprocessors_dict[exit_idx] = build_exit_branch(
             args, exit_idx, num_classes)
 
-    sparsee_detr = SparsEE_DETR(backbone_stages, exit_branches)
+    sparsee_detr = FixEE_DETR(backbone_stages, exit_branches)
 
     return sparsee_detr, criterion_dict, postprocessors_dict
