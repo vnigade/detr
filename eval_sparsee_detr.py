@@ -187,16 +187,18 @@ def compare_exit_outputs(args, model, data_loader, criterion_dict, base_ds, devi
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
     postprocessors = {'bbox': PostProcess()}
 
-    difficulty_dataset_f = open(output_dir / "exit0_labels.csv", "w")
+    # difficulty_dataset_f = open(output_dir / "exit0_labels.csv", "w")
 
     for samples, targets in data_loader:
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        exit_idx, out_exit_0 = model(samples, exit_choice=0)
+        with torch.no_grad():
+            exit_idx, out_exit_0 = model(samples, exit_choice=0)
         assert exit_idx == 0
 
-        exit_idx, out_exit_1 = model(samples, exit_choice=1)
+        with torch.no_grad():
+            exit_idx, out_exit_1 = model(samples, exit_choice=1)
         assert exit_idx == 1
 
         # Now try to match outputs of every exit with the main exit
@@ -214,12 +216,13 @@ def compare_exit_outputs(args, model, data_loader, criterion_dict, base_ds, devi
         if losses_0 <= _DIFFICULTY_THRESHOLDS[0]:
             outputs = out_exit_0
             exit_stats[0] += 1
-            difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 1\n")
+            # difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 1\n")
         else:
             outputs = out_exit_1
             exit_stats[1] += 1
-            difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 0\n")
+            # difficulty_dataset_f.write(f"{targets[0]['image_id'].cpu().numpy()[0]} 0\n")
 
+        # outputs = out_exit_0
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors['bbox'](outputs, orig_target_sizes)
 
@@ -236,7 +239,7 @@ def compare_exit_outputs(args, model, data_loader, criterion_dict, base_ds, devi
         print(f"Fraction of samples exited at {exit_idx}: {exit_stats[exit_idx] / exit_stats.sum()}")
     utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
 
-    difficulty_dataset_f.close()
+    # difficulty_dataset_f.close()
 
 
 def main(args):
@@ -263,7 +266,7 @@ def main(args):
     model.load_state_dict(checkpoint["model"], strict=True)
 
     # Create COCO dataloader
-    dataset_val = build_dataset(image_set='train_exit_condition', args=args)
+    dataset_val = build_dataset(image_set='val', args=args)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     base_ds = get_coco_api_from_dataset(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,

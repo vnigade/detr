@@ -7,14 +7,16 @@ import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
-from datasets import build_dataset
+from datasets import build_dataset, get_coco_api_from_dataset
+from datasets.coco_eval import CocoEvaluator
 from models import build_sparsee_model
+from models.detr import PostProcess
 from models.sparsee_detr import ExitCondition, SparsEE_DETR
 from util.misc import NestedTensor
 import util.misc as utils
 import time
 
-_SparsEE_DETR_BATCHSIZE = 4
+_SparsEE_DETR_BATCHSIZE = 1
 
 # @TODO: There are so much of dupliacte codes in the main execution scripts.
 # Move common functions to a separate helper or util files.
@@ -54,7 +56,7 @@ def read_exit_cond_labels(output_dir, exit_idx):
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Train exit condition', add_help=False)
-    parser.add_argument('--batch_size', default=4, type=int)
+    parser.add_argument('--batch_size', default=1, type=int)
 
     # Backbone
     parser.add_argument('--backbone', default='resnet50', type=str,
@@ -105,6 +107,7 @@ def get_args_parser():
                         help="Relative classification weight of the no-object class")
 
     # dataset parameters
+    parser.add_argument('--image_size', type=int)
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', type=str)
 
@@ -128,29 +131,50 @@ def get_args_parser():
     return parser
 
 
+# def get_dataset_samples(sparsee_detr_model, samples, targets, labels):
+#     features = []
+#     exit_targets = []
+#     with torch.no_grad():
+#         for i in range(0, args.batch_size, _SparsEE_DETR_BATCHSIZE):
+#             input = NestedTensor(samples.tensors[i:i + _SparsEE_DETR_BATCHSIZE],
+#                                  samples.mask[i:i + _SparsEE_DETR_BATCHSIZE])
+#             stage_out = get_stage_output(sparsee_detr_model, input, stage_idx=0)
+#             features.append(stage_out.clone().detach().cpu())
+
+#             # Get exit condition labels for the image ids.
+#             for target in targets[i:i + _SparsEE_DETR_BATCHSIZE]:
+#                 image_id = target["image_id"].numpy()[0]
+#                 assert image_id in labels
+#                 exit_targets.append(labels[image_id])
+#     features = torch.cat(features, dim=0)
+#     exit_targets = torch.tensor(exit_targets, dtype=float).unsqueeze(dim=-1)
+#     return features, exit_targets
+
 def get_dataset_samples(sparsee_detr_model, samples, targets, labels):
-    features = []
     exit_targets = []
     with torch.no_grad():
-        for i in range(0, args.batch_size, _SparsEE_DETR_BATCHSIZE):
-            input = NestedTensor(samples.tensors[i:i + _SparsEE_DETR_BATCHSIZE],
-                                 samples.mask[i:i + _SparsEE_DETR_BATCHSIZE])
-            stage_out = get_stage_output(sparsee_detr_model, input, stage_idx=0)
-            features.append(stage_out.clone().detach().cpu())
+        input = samples
+        stage_out = get_stage_output(sparsee_detr_model, input, stage_idx=0)
+        features = stage_out.clone().detach().cpu()
 
-            # Get exit condition labels for the image ids.
-            for target in targets[i:i + _SparsEE_DETR_BATCHSIZE]:
-                image_id = target["image_id"].numpy()[0]
-                assert image_id in labels
-                exit_targets.append(labels[image_id])
-    features = torch.cat(features, dim=0)
+        # Get exit condition labels for the image ids.
+        for target in targets:
+            image_id = target["image_id"].numpy()[0]
+            assert image_id in labels
+            exit_targets.append(labels[image_id])
+
     exit_targets = torch.tensor(exit_targets, dtype=float).unsqueeze(dim=-1)
     return features, exit_targets
 
 
-def validate(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
+def validate(exit_cond_model, sparsee_detr_model, data_loader, labels, base_ds, device):
     _EXIT_THRESHOLD = 0.75
     TP, FP, FN, TN = 0, 0, 0, 0
+    iou_types = tuple(['bbox'])
+    coco_evaluator = CocoEvaluator(base_ds, iou_types)
+    postprocessors = {'bbox': PostProcess().to(device)}
+    exit_cond_model.eval()
+    sparsee_detr_model.eval()
     with torch.no_grad():
         for samples, targets in data_loader:
             samples = samples.to(device)
@@ -160,11 +184,12 @@ def validate(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
             exit_targets = exit_targets.to(device)
 
             # Now pass it through exit conditiom model
-            outputs = exit_cond_model(features)
-            outputs = torch.sigmoid(outputs)
+            exit_outputs = exit_cond_model(features)
+            exit_outputs = torch.sigmoid(exit_outputs)
 
-            for output, exit_target in zip(outputs, exit_targets):
-                exit_now: bool = output >= _EXIT_THRESHOLD
+            for exit_output, exit_target, target in zip(exit_outputs, exit_targets, targets):
+                # print(f"ImageID: {target['image_id']}, ExitCondition: {exit_output}, ExitTarget: {exit_target}")
+                exit_now: bool = exit_output >= _EXIT_THRESHOLD
                 if exit_now == 1 and exit_target == 1:
                     TP += 1
                 elif exit_now == 1 and exit_target == 0:
@@ -176,8 +201,34 @@ def validate(exit_cond_model, sparsee_detr_model, data_loader, labels, device):
                 else:
                     raise NotImplementedError("Decision is not binary integers")
 
+            # Measure mAP
+            exit_idx, out_exit_0 = sparsee_detr_model(samples, exit_choice=0)
+            exit_idx, out_exit_1 = sparsee_detr_model(samples, exit_choice=1)
+
+            outputs = {"pred_logits": [], "pred_boxes": []}
+            for i, exit_output in enumerate(exit_outputs):
+                output = out_exit_0 if exit_output >= _EXIT_THRESHOLD else out_exit_1
+                outputs["pred_logits"].append(output["pred_logits"][i].unsqueeze(dim=0))
+                outputs["pred_boxes"].append(output["pred_boxes"][i].unsqueeze(dim=0))
+            outputs["pred_logits"] = torch.cat(outputs["pred_logits"], dim=0)
+            outputs["pred_boxes"] = torch.cat(outputs["pred_boxes"], dim=0)
+            # outputs = out_exit_0 if exit_targets[0] == 1 else out_exit_1
+
+            orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0).to(device)
+            results = postprocessors['bbox'](outputs, orig_target_sizes)
+
+            res = {target['image_id'].item(): output for target, output in zip(targets, results)}
+            coco_evaluator.update(res)
+
+    coco_evaluator.synchronize_between_processes()
+    coco_evaluator.accumulate()
+    coco_evaluator.summarize()
+    stats = {}
+    stats['coco_eval_bbox'] = coco_evaluator.coco_eval['bbox'].stats.tolist()
     total = TP + FP + FN + TN
     print(f"Validation: TP = {TP/total}, FP = {FP/total}, FN = {FN/total}, TN = {TN/total}")
+
+    return
 
 
 def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loader, labels, device):
@@ -228,10 +279,11 @@ def train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model, data_loade
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def train(args, exit_cond_model, sparsee_detr_model, data_loader_train, data_loader_val, labels_train, labels_val, device):
+def train(args, exit_cond_model, sparsee_detr_model, data_loader_train, data_loader_val, labels_train, labels_val, base_ds, device):
     output_dir = Path(args.output_dir)
     for epoch in range(args.start_epoch, args.epochs):
-        validate(exit_cond_model, sparsee_detr_model, data_loader_val, labels_val, device)
+        validate(exit_cond_model, sparsee_detr_model, data_loader_val, labels_val, base_ds, device)
+
         train_stats = train_one_epoch(args, epoch, exit_cond_model, sparsee_detr_model,
                                       data_loader_train, labels_train, device)
 
@@ -282,12 +334,14 @@ def main(args):
     exit_cond_model.to(device)
 
     # Create COCO dataloader
+    # dataset_train = build_dataset(image_set='train_exit_condition', args=args)
     dataset_train = build_dataset(image_set='train_exit_condition', args=args)
     sampler_train = torch.utils.data.SequentialSampler(dataset_train)
     data_loader_train = DataLoader(dataset_train, args.batch_size, sampler=sampler_train,
                                    drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)
 
     dataset_val = build_dataset(image_set='val', args=args)
+    base_ds = get_coco_api_from_dataset(dataset_val)
     sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                  drop_last=True, collate_fn=utils.collate_fn, num_workers=args.num_workers)
@@ -301,7 +355,9 @@ def main(args):
           data_loader_train,
           data_loader_val,
           train_labels,
-          val_labels, device)
+          val_labels,
+          base_ds,
+          device)
 
 
 if __name__ == '__main__':
