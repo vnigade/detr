@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate
-from models.sparsee_detr import _NAME_FMT_EXIT
+from models.fixee_detr import _NAME_FMT_EXIT
 import util.misc as utils
 from models import build_sparsee_model
 

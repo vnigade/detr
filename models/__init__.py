@@ -1,6 +1,6 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 from .detr import build
-from .sparsee_detr import build as build_sparsee_detr
+from .fixee_detr import build as build_sparsee_detr
 
 
 def build_model(args):
