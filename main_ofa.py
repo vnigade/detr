@@ -3,15 +3,13 @@ import argparse
 import copy
 import datetime
 import json
-import random
 import time
 from pathlib import Path
-from collections import OrderedDict
+
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-import torch.backends.cudnn as cudnn
 
 import datasets
 from models.ofa_backbone import SUPPORTED_INPUT_SIZES, build_ofa_backbone, get_static_ofa, set_active_backbone
@@ -19,63 +17,7 @@ import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
 from models import build_model
-
-
-def set_deterministic_behaviour(seed):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    cudnn.enabled = False
-    cudnn.deterministic = True
-    cudnn.benchmark = False
-    np.random.seed(seed)
-    random.seed(seed)
-
-
-def print_summary(model, data_shape=(3, 800, 1000)):
-    # summary(model, data_shape) # @TODO: This does not work because of the output shape in the detection output.
-
-    # Just print paramters with their name
-    print("Printing trainable parameters")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name)
-
-
-def load_checkpoint(path: str):
-    """
-    @TODO: This function is at many places in the main files. Make it clean.
-    """
-    if path.startswith('https'):
-        checkpoint = torch.hub.load_state_dict_from_url(
-            path, map_location='cpu', check_hash=True)
-    else:
-        checkpoint = torch.load(path, map_location='cpu')
-    return checkpoint
-
-
-def load_ofa_state(model_state_dict, ofa_checkpoint_state):
-    """
-    @TODO:
-    Merging state dicts with different checkpoints is also in other main files, so it's also a duplicate. WTH, Make it clean.
-    """
-    _BACKBONE_LAYER_PREFIX = "backbone"
-
-    new_state_dict = OrderedDict()
-    for model_key, model_value in model_state_dict.items():
-        # Keep other keys intact
-        if not model_key.startswith(_BACKBONE_LAYER_PREFIX):
-            new_state_dict[model_key] = model_value
-            continue
-
-        common_key = model_key.split(".", 2)[2]
-        # Change only the backbone
-        for ckpt_key, ckpt_value in ofa_checkpoint_state.items():
-            if common_key in ckpt_key and model_key not in new_state_dict:
-                new_state_dict[model_key] = ckpt_value
-
-        assert model_key in new_state_dict, f"Could not load model key {model_key}"
-        assert new_state_dict[model_key].shape == model_value.shape, f"Shape does not match {model_key}"
-    return new_state_dict
+from utils import load_ofa_state, load_checkpoint, set_deterministic_behaviour
 
 
 def build_ofa_detr(args, ofa_type, input_size):
@@ -251,7 +193,7 @@ def _eval_dynamic_switching_cost(model, input_size, output_dir, gpu_number=0, ma
     # Warm up
     data = torch.rand(1, 3, input_size, input_size)
     set_active_backbone(model.backbone.feature_extractor, input_size=None)
-    model.cuda(device=gpu_number)
+    # model.cuda(device=gpu_number)
     output = model(data)
     torch.cuda.synchronize(device=gpu_number)
 
