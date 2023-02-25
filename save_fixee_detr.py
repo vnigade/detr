@@ -1,6 +1,5 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
 import argparse
-from collections import OrderedDict
 import random
 from pathlib import Path
 
@@ -12,48 +11,7 @@ from engine import evaluate
 from models.fixee_detr import _NAME_FMT_EXIT
 import util.misc as utils
 from models import build_sparsee_model
-
-
-def print_summary(model, data_shape=(3, 800, 1000)):
-    # Just print paramters with their name
-    print("Printing trainable parameters")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name)
-
-    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print('number of params:', n_parameters)
-
-
-def load_checkpoint(path: str):
-    if path.startswith('https'):
-        checkpoint = torch.hub.load_state_dict_from_url(
-            path, map_location='cpu', check_hash=True)
-    else:
-        checkpoint = torch.load(path, map_location='cpu')
-    return checkpoint
-
-
-def load_partial_state(model_state_dict, chkpt_path: str, layer_prefix: str):
-    checkpoint = load_checkpoint(chkpt_path)
-    checkpoint = checkpoint["model"]
-
-    new_state_dict = OrderedDict()
-    for model_key, model_value in model_state_dict.items():
-        if not model_key.startswith(layer_prefix):
-            continue
-        common_key = model_key.split(".", 2)[2]
-
-        for ckpt_key, ckpt_value in checkpoint.items():
-            if common_key in ckpt_key and model_key not in new_state_dict:
-                # @TODO: There could be conflict between multiple common keys.
-                # We use order to resolve the conflict.
-                new_state_dict[model_key] = ckpt_value
-        assert model_key in new_state_dict, f"Could not load model key {model_key}"
-        print(f"shape of parameters {model_key}: {new_state_dict[model_key].shape}, {model_value.shape}")
-        assert new_state_dict[model_key].shape == model_value.shape, f"Shape does not match {model_key}"
-
-    return new_state_dict
+from utils import load_partial_state, print_summary
 
 
 def get_args_parser():

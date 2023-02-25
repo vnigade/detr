@@ -128,22 +128,40 @@ class OFAResNets(ResNets):
     def name():
         return "OFAResNets"
 
-    def _forward(self, x):
-        for layer in self.input_stem:
-            if (
-                self.input_stem_skipping > 0
-                and isinstance(layer, ResidualBlock)
-                and isinstance(layer.shortcut, IdentityLayer)
-            ):
-                pass
-            else:
-                x = layer(x)
-        x = self.max_pooling(x)
-        for stage_id, block_idx in enumerate(self.grouped_block_index):
+    def _forward_stage(self, x, stage_ids):
+        for stage_id in stage_ids:
+            block_idx = self.grouped_block_index[stage_id]
             depth_param = self.runtime_depth[stage_id]
             active_idx = block_idx[: len(block_idx) - depth_param]
             for idx in active_idx:
                 x = self.blocks[idx](x)
+
+        return x
+
+    def _forward_part(self, x, part_idx):
+        assert len(self.grouped_block_index) == 4
+        if part_idx == 0:
+            for layer in self.input_stem:
+                if (
+                    self.input_stem_skipping > 0
+                    and isinstance(layer, ResidualBlock)
+                    and isinstance(layer.shortcut, IdentityLayer)
+                ):
+                    pass
+                else:
+                    x = layer(x)
+            x = self.max_pooling(x)
+            x = self._forward_stage(x, stage_ids=[0, 1])
+        elif part_idx == 1:
+            x = self._forward_stage(x, stage_ids=[2, 3])
+        else:
+            raise NotImplementedError(f"{part_idx} is not implemented")
+        return x
+
+    def _forward(self, x):
+        x = self._forward_part(x, part_idx=0)
+        x = self._forward_part(x, part_idx=1)
+
         # x = self.global_avg_pool(x)
         # x = self.classifier(x)
         return x

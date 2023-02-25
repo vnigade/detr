@@ -24,6 +24,7 @@ _COUPLING_MODULES = {
 }
 
 _NUM_CHANNELS = {
+    "ofa_resnet": dict(layer2=512, layer4=2048),
     "resnet50": dict(layer2=512, layer4=2048),
     "resnet101": dict(layer2=512, layer4=2048)
 }
@@ -224,6 +225,17 @@ def build_exit_branch(args, exit_idx, num_classes):
     return exit_branch, criterion, postprocessors
 
 
+def build_exit_branches(args, num_classes):
+    exit_branches = OrderedDict()
+    criterion_dict = OrderedDict()
+    postprocessors_dict = OrderedDict()
+    for exit_idx in range(args.num_exits):
+        exit_name = _NAME_FMT_EXIT.format(exit_idx)
+        exit_branches[exit_name], criterion_dict[exit_idx], postprocessors_dict[exit_idx] = build_exit_branch(
+            args, exit_idx, num_classes)
+    return exit_branches, criterion_dict, postprocessors_dict
+
+
 def build(args):
     num_exits = args.num_exits
     num_stages = num_exits
@@ -241,13 +253,7 @@ def build(args):
         backbone_stages[stage_name] = build_backbone_stage(args, backbone, stage_idx=stage_idx)
 
     # Now build exit branches
-    exit_branches = OrderedDict()
-    criterion_dict = OrderedDict()
-    postprocessors_dict = OrderedDict()
-    for exit_idx in range(num_exits):
-        exit_name = _NAME_FMT_EXIT.format(exit_idx)
-        exit_branches[exit_name], criterion_dict[exit_idx], postprocessors_dict[exit_idx] = build_exit_branch(
-            args, exit_idx, num_classes)
+    exit_branches, criterion_dict, postprocessors_dict = build_exit_branches(args, num_classes)
 
     sparsee_detr = FixEE_DETR(backbone_stages, exit_branches)
 
