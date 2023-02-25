@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 import datasets
 from models.ofa_backbone import SUPPORTED_INPUT_SIZES, build_ofa_backbone, get_static_ofa, set_active_backbone
+from models.ofa.imagenet_classification.elastic_nn.networks import OFAResNets
 import util.misc as utils
 from datasets import build_dataset, get_coco_api_from_dataset
 from engine import evaluate, train_one_epoch
@@ -57,7 +58,8 @@ def merge_ofa_detr(args):
 
     # First save dynamic ofa-detr model
     ofa_detr_model = build_ofa_detr(args, ofa_type="dynamic", input_size=None)
-    checkpoint_path = output_dir / 'checkpoint_dynamic.pth'
+    print(f"Merged dynamic model with following configuration\n{ofa_detr_model.backbone.feature_extractor.module_str}")
+    checkpoint_path = output_dir / 'checkpoints/checkpoint_dynamic.pth'
     utils.save_on_master({'model': ofa_detr_model.state_dict()}, checkpoint_path)
 
     # Now build static ofa-detr model
@@ -67,13 +69,15 @@ def merge_ofa_detr(args):
         _args.ofa_type = "static"
 
         ofa_detr_model = build_ofa_detr(_args, ofa_type="static", input_size=input_size)
-        checkpoint_path = output_dir / f'checkpoint_static_{input_size}.pth'
+        print(f"Merged static model {input_size} with following configuration\n{ofa_detr_model.backbone.feature_extractor.module_str}")
+        checkpoint_path = output_dir / f'checkpoints/checkpoint_static_{input_size}.pth'
         utils.save_on_master({'model': ofa_detr_model.state_dict()}, checkpoint_path)
 
     return
 
 
 def eval_timings(args, detr_model: torch.nn.Module):
+    print(f"EvalTimings for {args.ofa_type} detr_model {args.image_size} of following configuration\n{detr_model.backbone.feature_extractor.module_str}")
     output_dir = Path(args.output_dir)
     NUM_ITERS = 100
     max_batch_size = args.batch_size
@@ -84,7 +88,9 @@ def eval_timings(args, detr_model: torch.nn.Module):
     detection_times = np.zeros((max_batch_size, NUM_ITERS), dtype=np.float32)
 
     detr_model.eval()
-    set_active_backbone(detr_model.backbone.feature_extractor, input_size=args.image_size)
+    if args.ofa_type == "dynamic":
+        set_active_backbone(detr_model.backbone.feature_extractor, input_size=args.image_size)
+        print(f"EvalTimings for {args.ofa_type} detr_model NOW {args.image_size} of following configuration\n{detr_model.backbone.feature_extractor.module_str}")
 
     for batch_size in range(1, max_batch_size + 1):
         # Warmup
@@ -112,7 +118,7 @@ def eval_timings(args, detr_model: torch.nn.Module):
             transformer_times[batch_size - 1][iter] = transformer_time
             detection_times[batch_size - 1][iter] = detection_time
 
-    with open(output_dir / f"eval_timings_{args.image_size}.txt", "w") as out_file:
+    with open(output_dir / f"exec_timings/eval_timings_{args.ofa_type}_{args.image_size}.txt", "w") as out_file:
         out_file.write(f"BatchSize\tElapsedTiming(ms)\tBackboneTime\tTransformerTime\tDetectionTime\n")
         for batch_size in range(1, max_batch_size + 1):
             elapsed_time = '%.3f' % round(exec_times[batch_size - 1].mean(), 3)
@@ -127,8 +133,22 @@ def eval_timings(args, detr_model: torch.nn.Module):
 
 
 def _eval_static_switching_cost(model, input_size, output_dir, gpu_number=0, max_batch_size=8):
+    def measure_size(model):
+        param_size = 0
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        buffer_size = 0
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+
+        size_all_mb = (param_size + buffer_size) / 1024**2
+        print('model size: {:.3f}MB'.format(size_all_mb))
+        
+    print(f"EvalSwitchingCost for static detr_model {input_size} of following configuration\n{model.backbone.feature_extractor.module_str}")
+    measure_size(model)
+    
     NUM_ITERS = 100
-    NUM_INFERENCES = 3
+    NUM_INFERENCES = 1 
 
     # Warm up
     data = torch.rand(1, 3, input_size, input_size)
@@ -174,7 +194,7 @@ def _eval_static_switching_cost(model, input_size, output_dir, gpu_number=0, max
             inference_times[batch_size - 1][iter] = round(inference_time, 3)
             gpu2cpu_times[batch_size - 1][iter] = round(gpu2cpu_time, 3)
 
-    with open(output_dir / f"eval_static_switching_cost_{input_size}.txt", "w") as out_file:
+    with open(output_dir / f"switching_cost/eval_static_switching_cost_{input_size}.txt", "w") as out_file:
         out_file.write(f"BatchSize\tCPU2GPUTime\tInferenceTime\tGPU2CPUTime\n")
         for batch_size in range(1, max_batch_size + 1):
             cpu2gpu_time = '%.3f' % round(cpu2gpu_times[batch_size - 1].mean(), 3)
@@ -187,18 +207,25 @@ def _eval_static_switching_cost(model, input_size, output_dir, gpu_number=0, max
 
 
 def _eval_dynamic_switching_cost(model, input_size, output_dir, gpu_number=0, max_batch_size=8):
+    print(f"EvalSwitchingCost for dynamic detr_model full of following configuration\n{model.backbone.feature_extractor.module_str}")
     NUM_ITERS = 100
-    NUM_INFERENCES = 3
+    NUM_INFERENCES = 1
 
     # Warm up
     data = torch.rand(1, 3, input_size, input_size)
+    data = data.cuda(device=gpu_number)
     set_active_backbone(model.backbone.feature_extractor, input_size=None)
     # model.cuda(device=gpu_number)
     output = model(data)
     torch.cuda.synchronize(device=gpu_number)
 
+    
     switching_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
     inference_times = np.zeros(shape=(max_batch_size, NUM_ITERS), dtype=np.float32)
+
+    # Just for testing
+    set_active_backbone(model.backbone.feature_extractor, input_size=input_size)
+    print(f"EvalSwitchingCost for dynamic detr_model {input_size} of following configuration\n{model.backbone.feature_extractor.module_str}")
 
     for batch_size in range(1, max_batch_size + 1):
         for iter in range(NUM_ITERS):
@@ -231,7 +258,7 @@ def _eval_dynamic_switching_cost(model, input_size, output_dir, gpu_number=0, ma
             switching_times[batch_size - 1][iter] = round(switching_time, 3)
             inference_times[batch_size - 1][iter] = round(inference_time, 3)
 
-    with open(output_dir / f"eval_dynamic_switching_cost_{input_size}.txt", "w") as out_file:
+    with open(output_dir / f"switching_cost/eval_dynamic_switching_cost_{input_size}.txt", "w") as out_file:
         out_file.write(f"BatchSize\tSwitchingTime\tInferenceTime\n")
         for batch_size in range(1, max_batch_size + 1):
             switching_time = '%.3f' % round(switching_times[batch_size - 1].mean(), 3)
@@ -252,7 +279,7 @@ def eval_switching_cost(args):
             _args.ofa_type = "static"
 
             model, criterion, postprocessors = build_model(_args)
-            checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_static_{input_size}.pth"))["model"]
+            checkpoint_state = load_checkpoint(str(output_dir / f"checkpoints/checkpoint_static_{input_size}.pth"))["model"]
             model.load_state_dict(checkpoint_state, strict=True)
             model.eval()
             model.cpu()
@@ -260,16 +287,18 @@ def eval_switching_cost(args):
             models_dict[input_size] = model
 
         for input_size in SUPPORTED_INPUT_SIZES:
+            print(f"Evaluating switching cost for static model {input_size}")
             _eval_static_switching_cost(models_dict[input_size], input_size=input_size, output_dir=output_dir)
 
     elif args.ofa_type == "dynamic":
         model, criterion, postprocessors = build_model(args)
-        checkpoint_state = load_checkpoint(str(output_dir / f"checkpoint_dynamic.pth"))["model"]
+        checkpoint_state = load_checkpoint(str(output_dir / f"checkpoints/checkpoint_dynamic.pth"))["model"]
         model.load_state_dict(checkpoint_state, strict=True)
         model.eval()
         model.cpu()
 
         for input_size in SUPPORTED_INPUT_SIZES:
+            print(f"Evaluating switching cost for dynamic model {input_size}")
             _eval_dynamic_switching_cost(model, input_size=input_size, output_dir=output_dir)
             model.cpu()
 
